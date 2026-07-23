@@ -1,0 +1,18 @@
+[Unit]
+Description=Family organizer Telegram bot (claude-powered calendar)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=content
+WorkingDirectory=/opt/family-bot
+EnvironmentFile=/opt/family-bot/env
+ExecStart=/opt/family-bot/.venv/bin/python -m familybot
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

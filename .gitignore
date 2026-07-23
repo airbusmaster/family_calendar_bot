@@ -1,0 +1,25 @@
+# секреты и окружение
+.env
+env
+*.env
+
+# база и данные
+*.db
+*.db-wal
+*.db-shm
+family.db
+backup/
+
+# модели whisper (качаются при первом запуске)
+models/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# ос
+.DS_Store
