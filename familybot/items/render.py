@@ -41,7 +41,10 @@ def events_in(a, b, status=None):
     """События в окне [a,b). По умолчанию — все (в т.ч. отмеченные), чтобы расписание было полным."""
     q = ("SELECT * FROM items WHERE kind='event' AND when_dt IS NOT NULL "
          "AND when_dt>=? AND when_dt<?")
-    args = [a.isoformat(timespec="minutes"), b.isoformat(timespec="minutes")]
+    # границы приводим к наивному виду: when_dt в БД хранится без таймзоны (МСК),
+    # иначе суффикс +03:00 ломает строковое сравнение и события на 00:00 выпадают
+    args = [a.replace(tzinfo=None).isoformat(timespec="minutes"),
+            b.replace(tzinfo=None).isoformat(timespec="minutes")]
     if status:
         q += " AND status=?"
         args.append(status)
