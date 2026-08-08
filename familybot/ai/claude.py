@@ -23,8 +23,14 @@ def extract_json(s):
         return None
 
 
-def claude_json(prompt, model, timeout, think=False):
+def claude_json(prompt, model, timeout, think=False, tools=""):
     """Запуск claude -p с JSON-ответом.
+
+    tools — какие инструменты доступны модели: "" (никаких) для разбора текста,
+    "Read" для чтения присланного файла. Это защита от инъекции: в промпт попадает
+    произвольный чужой текст (пересланное письмо, содержимое PDF), а рабочий каталог
+    процесса — /opt/family-bot, где лежат env с токенами и база. Без ограничения
+    инструментов подсунутая инструкция могла бы выполнить команду в системе.
 
     None — модель ответила, но JSON не разобрался (сообщение непонятно);
     {"_error": True} — сам сервис недоступен (упал CLI, таймаут, протух токен),
@@ -38,11 +44,16 @@ def claude_json(prompt, model, timeout, think=False):
     env = dict(os.environ)
     if not think:
         env["MAX_THINKING_TOKENS"] = "0"
+    cmd = ["claude", "-p", prompt, "--model", model, "--output-format", "text",
+           "--tools", tools]
+    if tools:
+        cmd += ["--permission-mode", "bypassPermissions"]
     try:
         proc = subprocess.run(
-            ["claude", "-p", prompt, "--model", model,
-             "--permission-mode", "bypassPermissions", "--output-format", "text"],
-            capture_output=True, text=True, timeout=timeout, env=env,
+            cmd, capture_output=True, text=True, timeout=timeout, env=env,
+            # без этого CLI три секунды ждёт данные на stdin, которых мы не шлём, —
+            # ровно три секунды задержки на каждом сообщении (найдено 08.08.2026)
+            stdin=subprocess.DEVNULL,
         )
         if proc.returncode != 0:
             print("claude rc", proc.returncode, proc.stderr[:300], flush=True)

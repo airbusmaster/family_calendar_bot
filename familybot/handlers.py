@@ -7,10 +7,11 @@ import re
 import json
 import time
 import hashlib
+import threading
 import traceback
 from datetime import datetime
 
-from .db import db, state_get, state_set
+from .db import db, DB_LOCK, state_get, state_set
 from .timeutil import now
 from .telegram.api import (tg, send, edit_text, typing, delete_msg,
                            download_voice, download_tg_file)
@@ -19,14 +20,108 @@ from .items.render import line, block, html_escape, render_list
 from .items.repository import (norm_when, add_item, find_target, find_dup, search_events,
                                delete_item, update_item, remember_act, reinsert)
 from .ai.claude import claude_json
-from .ai.parser import parse_intent, analyze_file
+from .ai.parser import parse_intent, analyze_file, analyze_forward
 from .ai.voice import transcribe
 from .ai.prompts import DRAFT_PROMPT
 from .config import CLAUDE_MODEL
 from .help_text import HELP
 from .ui import del_keyboard, reply_ref, notify_partner
-from .files import draft_state, show_draft, confirm_draft, process_file
+from .files import draft_state, show_draft, confirm_draft, process_files
 from .access import ensure_access
+
+
+# ------------------------------------------------------------------ альбомы (несколько файлов)
+_MEDIA_GROUPS = {}
+_MG_LOCK = threading.Lock()
+MEDIA_GROUP_WAIT = 3.0   # сколько ждём остальные файлы альбома после каждого пришедшего
+
+
+def rm_files(paths):
+    for p in paths:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+
+def dup_files(chat_id, uid, paths):
+    """Те же файлы прислали повторно за 10 минут — не плодим дубли событий."""
+    h = hashlib.md5()
+    try:
+        for p in paths:
+            with open(p, "rb") as f:
+                h.update(f.read())
+    except OSError:
+        return False
+    digest = h.hexdigest()
+    prev = state_get(f"lastfile_{uid}")
+    if prev:
+        try:
+            pf = json.loads(prev)
+            if (pf.get("hash") == digest
+                    and (now() - datetime.fromisoformat(pf["ts"])).total_seconds() < 600):
+                rm_files(paths)
+                reply(chat_id, "👌 Это я уже обработал только что.")
+                return True
+        except (ValueError, KeyError):
+            pass
+    state_set(f"lastfile_{uid}", json.dumps({"hash": digest, "ts": now().isoformat()}))
+    return False
+
+
+def queue_media_group(chat_id, uid, mgid, path, caption):
+    """Накопить файлы одного альбома и разобрать их вместе, когда поток прекратится."""
+    key = (chat_id, mgid)
+    with _MG_LOCK:
+        g = _MEDIA_GROUPS.get(key)
+        first = g is None
+        if first:
+            g = _MEDIA_GROUPS[key] = {"uid": uid, "files": [], "captions": [], "timer": None}
+        g["files"].append(path)
+        if caption:
+            g["captions"].append(caption)
+        if g["timer"]:
+            g["timer"].cancel()
+        g["timer"] = threading.Timer(MEDIA_GROUP_WAIT, flush_media_group, args=(chat_id, mgid))
+        g["timer"].daemon = True
+        g["timer"].start()
+    if first:
+        reply(chat_id, "📎 Вижу несколько файлов — дождусь остальные и разберу все разом…")
+
+
+def flush_media_group(chat_id, mgid):
+    """Таймер альбома сработал: файлов больше не приходит — разбираем пачку."""
+    with _MG_LOCK:
+        g = _MEDIA_GROUPS.pop((chat_id, mgid), None)
+    if not g or not g["files"]:
+        return
+    paths, n = g["files"], len(g["files"])
+    try:
+        # DB_LOCK берём только вокруг работы с базой: распознавание нескольких файлов
+        # занимает минуты, и держать на это время общий лок — значит подвесить бота
+        with DB_LOCK:
+            if dup_files(chat_id, g["uid"], paths):
+                return
+            print(f"[file] альбом {mgid}: {n} шт.", flush=True)
+            reply(chat_id, f"📎 Изучаю файлы ({n} шт.) — это может занять минуту…")
+        caption = " ".join(g["captions"]) or None
+        datas = []
+        with TypingLoop(chat_id):
+            for i, p in enumerate(paths, 1):
+                datas.append(analyze_file(p, caption))
+                print(f"[file] {i}/{n} готов", flush=True)
+        with DB_LOCK:
+            process_files(chat_id, g["uid"], datas)
+    except Exception:
+        traceback.print_exc()
+        reply(chat_id, "⚠️ Не получилось разобрать файлы. Попробуй прислать их ещё раз.")
+    finally:
+        rm_files(paths)
+
+
+def is_forwarded(msg):
+    return bool(msg.get("forward_origin") or msg.get("forward_date")
+                or msg.get("forward_from") or msg.get("forward_from_chat"))
 
 
 def handle_message(msg):
@@ -84,32 +179,18 @@ def handle_message(msg):
         if not fp:
             reply(chat_id, "📎 Не смог скачать файл, попробуй ещё раз.")
             return
-        # тот же файл только что уже присылали — не плодим дубли событий
-        try:
-            fhash = hashlib.md5(open(fp, "rb").read()).hexdigest()
-        except OSError:
-            fhash = None
-        if fhash:
-            prevf = state_get(f"lastfile_{uid}")
-            if prevf:
-                try:
-                    pf = json.loads(prevf)
-                    if (pf.get("hash") == fhash
-                            and (now() - datetime.fromisoformat(pf["ts"])).total_seconds() < 600):
-                        os.remove(fp)
-                        reply(chat_id, "👌 Этот файл я уже обработал только что.")
-                        return
-                except (ValueError, KeyError):
-                    pass
-            state_set(f"lastfile_{uid}", json.dumps({"hash": fhash, "ts": now().isoformat()}))
+        mgid = msg.get("media_group_id")
+        if mgid:
+            # альбом: Telegram шлёт каждое фото ОТДЕЛЬНЫМ сообщением — копим и разбираем пачкой
+            queue_media_group(chat_id, uid, mgid, fp, caption)
+            return
+        if dup_files(chat_id, uid, [fp]):
+            return
         reply(chat_id, "📎 Изучаю файл, секунду…")
         with TypingLoop(chat_id):
             data = analyze_file(fp, caption)
-        try:
-            os.remove(fp)
-        except OSError:
-            pass
-        process_file(chat_id, uid, data)
+        rm_files([fp])
+        process_files(chat_id, uid, [data])
         return
 
     # подчистить сообщение пользователя (текст/команда), чтобы чат не рос
@@ -160,6 +241,20 @@ def handle_message(msg):
                 return
         except (ValueError, KeyError):
             pass
+
+    # пересланное чужое сообщение (напоминание из клиники, приглашение, бронь) — через черновик
+    if is_forwarded(msg) and len(text) >= 25 and not draft_state(chat_id):
+        with TypingLoop(chat_id):
+            fw = analyze_forward(text)
+        evs = [e for e in ((fw or {}).get("events") or [])
+               if isinstance(e, dict) and e.get("when")]
+        print(f"[forward] events={len(evs)} text={text[:60]!r}", flush=True)
+        if evs:
+            show_draft(chat_id, evs,
+                       prefix=voice_prefix + "📨 <i>Разобрал пересланное сообщение.</i>\n\n",
+                       head="<b>Похоже, это событие:</b>")
+            return
+        # события не нашлось — дальше как обычный текст
 
     # висит черновик с фото — сообщение может быть его правкой или подтверждением
     dobj = draft_state(chat_id)

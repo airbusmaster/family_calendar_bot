@@ -50,7 +50,7 @@ def draft_state(chat_id):
     return d if d.get("events") else None
 
 
-def show_draft(chat_id, events, prefix=""):
+def show_draft(chat_id, events, prefix="", head="📸 <b>Вот что я распознал:</b>"):
     """Показать черновик с кнопками; правится обычным текстом, добавляется по кнопке.
     Токен в кнопках защищает от нажатий на устаревшую карточку."""
     token = str(int(time.time() * 1000) % 10**9)
@@ -59,9 +59,9 @@ def show_draft(chat_id, events, prefix=""):
     kb = json.dumps({"inline_keyboard": [[
         {"text": "✅ Добавить", "callback_data": f"draft:add:{token}"},
         {"text": "❌ Отмена", "callback_data": f"draft:no:{token}"}]]})
-    reply(chat_id, prefix + "📸 <b>Вот что я распознал:</b>\n\n" + draft_lines(events) +
+    reply(chat_id, prefix + head + "\n\n" + draft_lines(events) +
           "\n\nДобавить в календарь? Поправить можно просто текстом: "
-          "<i>«время 19:00», «назови день рождения Пети», «дата 5 августа»</i>.",
+          "<i>«время 19:00», «назови день рождения Пети», «второе — 5 августа»</i>.",
           reply_markup=kb)
 
 
@@ -97,29 +97,68 @@ def confirm_draft(chat_id, uid):
     return rows, warns
 
 
-def process_file(chat_id, uid, data):
-    """Распознанный файл: билет добавляем сразу, событие — через черновик с подтверждением."""
-    if data and data.get("_error"):
-        reply(chat_id, "🤖 Сервис распознавания сейчас недоступен — пришли файл ещё раз "
-              "через минуту-другую.")
-        return
-    if data and data.get("trips"):
-        process_ticket(chat_id, uid, data)
-    elif data and data.get("events"):
-        show_draft(chat_id, data["events"])
-    else:
-        reply(chat_id, "📎 Не нашёл в файле ни билета, ни события с датой. "
-              "Пришли другой файл или напиши данные текстом.")
+def _dedupe_events(events):
+    """Одно событие могло попасть в несколько файлов альбома — не показываем дважды."""
+    seen, out = set(), []
+    for e in events:
+        key = ((e.get("title") or "").strip().lower(), str(e.get("when") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(e)
+    return out
 
 
-def process_ticket(chat_id, uid, data):
-    """Из распознанного билета создать события-поездки в календаре."""
-    if not data or not data.get("trips"):
-        reply(chat_id, "📎 Не нашёл в файле билет или поездку. Пришли другой файл "
-              "(PDF/фото билета) или напиши данные текстом.")
+def process_files(chat_id, uid, datas, prefix=""):
+    """Результаты распознавания одного файла или целого альбома.
+
+    Билеты заводим сразу, события собираем в ОДИН черновик: на каждый файл свою карточку
+    делать нельзя — в чистом режиме следующая карточка удаляет предыдущую, а черновик
+    в state вообще один, поэтому из четырёх фото доезжало только последнее (баг 2026-08-08).
+    """
+    datas = [d for d in datas if d]
+    failed = sum(1 for d in datas if d.get("_error"))
+    if datas and failed == len(datas):
+        reply(chat_id, prefix + "🤖 Сервис распознавания сейчас недоступен — пришли файлы "
+              "ещё раз через минуту-другую.")
         return
+    trips, events = [], []
+    for d in datas:
+        if d.get("_error"):
+            continue
+        trips += [t for t in (d.get("trips") or []) if isinstance(t, dict)]
+        events += [e for e in (d.get("events") or []) if isinstance(e, dict)]
+    events = _dedupe_events(events)
+    warn = (f"\n⚠️ Ещё {failed} файл(а) разобрать не смог — пришли их отдельно."
+            if failed else "")
+
+    rows = add_trips(uid, trips) if trips else []
+    trips_txt = ""
+    if rows:
+        trips_txt = "🧳 <b>Добавил поездку в календарь:</b>\n\n" + block(rows) + "\n\n———\n\n"
+        state_set(f"focus_{chat_id}", str(rows[-1]["id"]))
+        notify_partner(uid, "➕ {who} добавил(а) поездку", block(rows), rows[-1]["id"])
+
+    if events:
+        # поездки и черновик уходят одним сообщением: два reply подряд затирают друг друга
+        show_draft(chat_id, events, prefix=prefix + trips_txt)
+        return
+    if rows:
+        reply(chat_id, prefix + trips_txt.replace("\n\n———\n\n", "") + warn,
+              reply_markup=del_keyboard(rows[-1]["id"]) if len(rows) == 1 else None)
+        return
+    if trips:
+        reply(chat_id, prefix + "📎 Билет распознал, но не нашёл дату отправления. "
+              "Добавь поездку текстом с датой, пожалуйста." + warn)
+        return
+    reply(chat_id, prefix + "📎 Не нашёл ни билета, ни события с датой. "
+          "Пришли другой файл или напиши данные текстом." + warn)
+
+
+def add_trips(uid, trips):
+    """Из распознанных билетов создать события-поездки. -> список строк БД."""
     added = []
-    for tr in data["trips"]:
+    for tr in trips:
         when_iso, _ht = norm_when(tr.get("depart"))
         if not when_iso:
             continue
@@ -137,12 +176,4 @@ def process_ticket(chat_id, uid, data):
                   "note": "; ".join(np) or None, "remind_before_min": None}
         iid, _k, _w, _h = add_item(intent, uid)
         added.append(db().execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone())
-    if not added:
-        reply(chat_id, "📎 Файл распознал, но не нашёл дату отправления. "
-              "Добавь поездку текстом с датой, пожалуйста.")
-        return
-    state_set(f"focus_{chat_id}", str(added[-1]["id"]))
-    body = block(added)
-    reply(chat_id, "🧳 <b>Добавил поездку в календарь:</b>\n\n" + body,
-          reply_markup=del_keyboard(added[-1]["id"]) if len(added) == 1 else None)
-    notify_partner(uid, "➕ {who} добавил(а) поездку", body, added[-1]["id"])
+    return added

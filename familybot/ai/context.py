@@ -6,7 +6,7 @@
 """
 
 from ..db import db, state_get
-from ..timeutil import fmt_dt, parse_iso
+from ..timeutil import fmt_dt, now, parse_iso
 
 
 def item_brief(r):
@@ -43,10 +43,25 @@ def context_block(chat_id, ref_id=None):
             r = c.execute("SELECT * FROM items WHERE id=?", (int(fid),)).fetchone()
             if r:
                 lines.append("В фокусе (последняя запись): " + item_brief(r))
-    rows = c.execute(
-        "SELECT * FROM items ORDER BY (kind!='event'), when_dt, id DESC LIMIT 30"
-    ).fetchall()
-    if rows:
-        lines.append("Записи:")
-        lines += ["  " + item_brief(r) for r in rows]
+    # ВАЖНО: сначала будущее. Раньше был один запрос "ORDER BY when_dt LIMIT 30" —
+    # он отдавал 30 САМЫХ СТАРЫХ записей, и с ростом архива модель переставала видеть
+    # ближайшие события вообще (на 08.08.2026 из 9 будущих в контекст попадало одно).
+    nn = now().replace(tzinfo=None).isoformat(timespec="minutes")
+    future = c.execute(
+        "SELECT * FROM items WHERE kind='event' AND (when_dt IS NULL OR when_dt>=?) "
+        "ORDER BY when_dt IS NULL, when_dt LIMIT 25", (nn,)).fetchall()
+    past = c.execute(
+        "SELECT * FROM items WHERE kind='event' AND when_dt<? "
+        "ORDER BY when_dt DESC LIMIT 5", (nn,)).fetchall()
+    places = c.execute(
+        "SELECT * FROM items WHERE kind!='event' ORDER BY id DESC LIMIT 5").fetchall()
+    if future:
+        lines.append("Записи (ближайшие сначала):")
+        lines += ["  " + item_brief(r) for r in future]
+    if past:
+        lines.append("Уже прошли (обычно речь не о них):")
+        lines += ["  " + item_brief(r) for r in past]
+    if places:
+        lines.append("Места:")
+        lines += ["  " + item_brief(r) for r in places]
     return "\n".join(lines) if lines else "(пока пусто)"

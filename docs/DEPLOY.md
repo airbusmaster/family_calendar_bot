@@ -64,9 +64,20 @@ journalctl -u family-bot -f
 git -C /opt/family-bot pull
 sudo systemctl restart family-bot
 
-# бэкап базы
-cp /opt/family-bot/family.db ./family-$(date +%F).db
+# бэкап базы — ТОЛЬКО через .backup: база в режиме WAL, и `cp family.db`
+# заберёт данные на момент последней контрольной точки, потеряв всё свежее
+/opt/family-bot/.venv/bin/python /opt/family-bot/deploy/backup.py
 ```
+
+## 5. Автобэкап
+
+Ночная копия базы в `/opt/family-bot/backup/`, хранится 14 дней. Крон пользователя `content`:
+
+```bash
+sudo -u content crontab -l | { cat; echo '10 4 * * * /opt/family-bot/.venv/bin/python /opt/family-bot/deploy/backup.py >> /opt/family-bot/backup/backup.log 2>&1'; } | sudo -u content crontab -
+```
+
+Забрать копию на свою машину: `scp vps:/opt/family-bot/backup/family-*.db ./`
 
 ## Память
 

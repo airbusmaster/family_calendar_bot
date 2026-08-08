@@ -113,12 +113,31 @@ def cal_reconcile():
                      "AND when_dt >= ?", (horizon.isoformat(timespec="minutes"),)).fetchall()
     changes = []
     seen = set()
+
+    # Предохранитель: пропавшее в iCloud событие мы удаляем и у себя — это правильно, когда
+    # его стёрли с телефона. Но если CalDAV вернёт успешный, но НЕПОЛНЫЙ ответ (сбой на стороне
+    # Apple, не тот календарь, ошибка разбора), тем же кодом снесёт всё будущее разом. Поэтому
+    # сначала считаем пропажи и на подозрительном масштабе не удаляем ничего.
+    synced = [r for r in rows if r["cal_synced"]]
+    missing = [r for r in synced if (r["ical_uid"] or item_uid(r["id"])) not in remote]
+    bulk_loss = missing and (len(missing) >= 3 and len(missing) > len(synced) / 3)
+    if bulk_loss:
+        print(f"[sync] ОТКАЗ УДАЛЯТЬ: в iCloud не нашлось {len(missing)} из {len(synced)} "
+              f"синхронизированных записей — похоже на сбой, а не на правку с телефона",
+              flush=True)
+        broadcast("⚠️ Календарь iCloud вернул подозрительно мало событий "
+                  f"(не хватает {len(missing)} из {len(synced)}). На всякий случай ничего "
+                  "не удаляю — записи целы. Если ты правда чистил календарь, скажи мне, "
+                  "и я приведу расписание в порядок.")
+
     for r in rows:
         uid = r["ical_uid"] or item_uid(r["id"])
         seen.add(uid)
         rem = remote.get(uid)
         if rem is None:
             if r["cal_synced"]:
+                if bulk_loss:
+                    continue  # массовая пропажа — не трогаем, ждём следующей сверки
                 c.execute("DELETE FROM items WHERE id=?", (r["id"],))
                 c.commit()
                 changes.append("🗑 удалено: " + r["title"])

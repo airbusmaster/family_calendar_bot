@@ -12,12 +12,19 @@ from ..cards import extract_cards
 API = f"https://api.telegram.org/bot{config.TG_TOKEN}"
 
 
+def mask(text):
+    """Убрать токен бота из текста ошибки: requests кладёт в исключение полный URL,
+    и при сбое DNS журнал за сутки набивается сотнями строк с токеном (найдено 08.08.2026)."""
+    s = str(text)
+    return s.replace(config.TG_TOKEN, "<TOKEN>") if config.TG_TOKEN else s
+
+
 def tg(method, **params):
     try:
         r = requests.post(f"{API}/{method}", json=params, timeout=30)
         return r.json()
     except Exception as e:
-        print("tg error:", method, e, flush=True)
+        print("tg error:", method, mask(e), flush=True)
         return {}
 
 
@@ -77,7 +84,7 @@ def download_voice(file_id):
     try:
         data = requests.get(url, timeout=60).content
     except Exception as e:
-        print("voice download error", e, flush=True)
+        print("voice download error", mask(e), flush=True)
         return None
     tmp = f"/tmp/voice_{file_id[:16]}.ogg"
     with open(tmp, "wb") as f:
@@ -95,7 +102,7 @@ def download_tg_file(file_id, suffix):
     try:
         data = requests.get(url, timeout=120).content
     except Exception as e:
-        print("file download error", e, flush=True)
+        print("file download error", mask(e), flush=True)
         return None
     tmp = f"/tmp/tgfile_{file_id[:16]}{suffix}"
     with open(tmp, "wb") as f:

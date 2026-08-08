@@ -13,7 +13,7 @@ import requests
 
 from . import config
 from .db import DB_LOCK, init_db
-from .telegram.api import API, tg
+from .telegram.api import API, tg, mask
 from .handlers import handle_message, handle_callback
 from .scheduler import scheduler_loop
 from .calendar_sync.client import CAL_SYNC, cal_worker
@@ -46,7 +46,7 @@ def main():
             r = requests.get(f"{API}/getUpdates",
                              params={"timeout": 50, "offset": offset}, timeout=60).json()
         except Exception as e:
-            print("getUpdates error", e, flush=True)
+            print("getUpdates error", mask(e), flush=True)
             time.sleep(3)
             continue
         if not r.get("ok"):

@@ -198,11 +198,15 @@ def update_item(row, intent):
             args.append(str(v).strip())
     rb = intent.get("remind_before_min")
     if rb not in (None, "null", ""):
+        # int() считаем ДО того, как трогаем sets: иначе на «напомни за час» вместо числа
+        # плейсхолдер уже добавлен, аргумент нет, и UPDATE падает на несовпадении (баг 08.08)
         try:
-            sets += ["remind_before_min=?", "remind_sent=0"]
-            args.append(int(rb))
+            rb_val = int(rb)
         except (ValueError, TypeError):
-            pass
+            warns.append(f"напоминание «{rb}» не понял — оставил прежнее")
+        else:
+            sets += ["remind_before_min=?", "remind_sent=0"]
+            args.append(rb_val)
     rec = intent.get("recur")
     if rec in RECUR_TITLE:
         sets.append("recur=?")

@@ -6,7 +6,7 @@ from .. import config
 from ..timeutil import now
 from .claude import claude_json
 from .context import context_block
-from .prompts import PROMPT, FILE_PROMPT
+from .prompts import PROMPT, FILE_PROMPT, FORWARD_PROMPT
 
 _WEEKDAY = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
 
@@ -23,8 +23,15 @@ def parse_intent(text, chat_id, ref_id=None):
     return claude_json(prompt, config.CLAUDE_MODEL, 90)
 
 
+def analyze_forward(text):
+    """Пересланное сообщение -> события с датой (или пусто, если это не событие)."""
+    n = now()
+    prompt = FORWARD_PROMPT.format(now=n.strftime("%Y-%m-%d %H:%M"), message=text)
+    return claude_json(prompt, config.CLAUDE_MODEL, 90)
+
+
 def analyze_file(path, caption=None):
     n = now()
     hint = f"\nПодпись пользователя к файлу: «{caption}» — учти её." if caption else ""
     prompt = FILE_PROMPT.format(path=path, now=n.strftime("%Y-%m-%d %H:%M"), caption_hint=hint)
-    return claude_json(prompt, config.TICKET_MODEL, 180, think=True)
+    return claude_json(prompt, config.TICKET_MODEL, 180, think=True, tools="Read")
