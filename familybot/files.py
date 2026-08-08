@@ -105,9 +105,13 @@ def _dedupe_trips(trips):
     """
     seen, out = set(), []
     for t in trips:
-        key = (str(t.get("mode") or ""), str(t.get("from") or "").strip().lower(),
-               str(t.get("to") or "").strip().lower(), str(t.get("depart") or ""),
-               str(t.get("passenger") or "").strip().lower())
+        who = str(t.get("passenger") or "").strip().lower()
+        # по пассажиру и времени отправления, а НЕ по названию: модель каждый раз пишет
+        # станции по-разному («СПб-Главный» / «Санкт-Петербург-Главный (Московский Вокзал)»)
+        key = ((str(t.get("depart") or ""), who) if who else
+               (str(t.get("depart") or ""), str(t.get("mode") or ""),
+                str(t.get("from") or "").strip().lower(),
+                str(t.get("to") or "").strip().lower()))
         if key in seen:
             continue
         seen.add(key)
@@ -199,11 +203,18 @@ def add_trips(uid, trips):
         intent = {"kind": "event", "title": title, "when": tr.get("depart"),
                   "category": "trip", "who": tr.get("passenger"),
                   "note": "; ".join(np) or None, "remind_before_min": None}
-        # такой же билет того же пассажира уже заводили — второй раз не нужен
-        if db().execute(
-                "SELECT 1 FROM items WHERE kind='event' AND when_dt=? AND lower(title)=lower(?) "
-                "AND IFNULL(lower(who),'')=IFNULL(lower(?),'')",
-                (when_iso, title, tr.get("passenger"))).fetchone():
+        # Такой же билет уже заводили — второй раз не нужен. Сверяем по пассажиру и времени
+        # отправления: сравнение по названию не работает, модель пишет станции то полностью,
+        # то сокращённо, и дубль проскакивает (поймано на реальных билетах 08.08.2026).
+        if tr.get("passenger"):
+            same = db().execute(
+                "SELECT 1 FROM items WHERE kind='event' AND category='trip' AND when_dt=? "
+                "AND lower(who)=lower(?)", (when_iso, tr["passenger"])).fetchone()
+        else:
+            same = db().execute(
+                "SELECT 1 FROM items WHERE kind='event' AND category='trip' AND when_dt=? "
+                "AND lower(title)=lower(?)", (when_iso, title)).fetchone()
+        if same:
             skipped += 1
             continue
         iid, _k, _w, _h = add_item(intent, uid)
