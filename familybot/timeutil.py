@@ -32,6 +32,17 @@ def fmt_dt(s, has_time):
     return base
 
 
+_MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня",
+               "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+_WEEKDAYS_FULL = ["понедельник", "вторник", "среда", "четверг",
+                  "пятница", "суббота", "воскресенье"]
+
+
+def fmt_day(dt):
+    """Дата для заголовка списка на день: «8 августа, пятница»."""
+    return f"{dt.day} {_MONTHS_GEN[dt.month - 1]}, {_WEEKDAYS_FULL[dt.weekday()]}"
+
+
 def window(filter_):
     n = now()
     start = n.replace(hour=0, minute=0, second=0, microsecond=0)

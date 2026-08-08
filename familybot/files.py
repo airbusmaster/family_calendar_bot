@@ -9,13 +9,15 @@ from .config import TRIP_EMOJI
 from .db import db, state_get, state_set
 from .timeutil import now, parse_iso, fmt_dt
 from .telegram.chat import reply
-from .items.render import line, html_escape
+from .items.render import block, html_escape
 from .items.repository import norm_when, add_item, find_dup, remember_act
 from .ui import del_keyboard, notify_partner
 
 
 def draft_lines(events):
+    """Номер у пункта ставим, только когда событий несколько — иначе он лишний шум."""
     out = []
+    many = len(events) > 1
     for i, ev in enumerate(events, 1):
         when_iso, ht = norm_when(ev.get("when"))
         dt_txt = fmt_dt(when_iso, ht) if when_iso else "❓ дата не распознана"
@@ -24,13 +26,14 @@ def draft_lines(events):
             if e_iso and e_ht and e_iso > when_iso:
                 edt = parse_iso(e_iso)
                 dt_txt += f"–{edt.hour:02d}:{edt.minute:02d}"
-        parts = [f"{i}. <b>{html_escape(ev.get('title') or 'без названия')}</b> — {dt_txt}"]
+        num = f"{i}. " if many else ""
+        parts = [f"{num}<b>{html_escape(ev.get('title') or 'без названия')}</b> — {dt_txt}"]
         if ev.get("who"):
             parts.append("👤 " + html_escape(str(ev["who"])))
         if ev.get("note"):
             parts.append("<i>" + html_escape(str(ev["note"])) + "</i>")
         out.append("\n   ".join(parts))
-    return "\n".join(out)
+    return "\n\n".join(out)
 
 
 def draft_state(chat_id):
@@ -139,7 +142,7 @@ def process_ticket(chat_id, uid, data):
               "Добавь поездку текстом с датой, пожалуйста.")
         return
     state_set(f"focus_{chat_id}", str(added[-1]["id"]))
-    body = "\n".join(line(r) for r in added)
+    body = block(added)
     reply(chat_id, "🧳 <b>Добавил поездку в календарь:</b>\n\n" + body,
           reply_markup=del_keyboard(added[-1]["id"]) if len(added) == 1 else None)
     notify_partner(uid, "➕ {who} добавил(а) поездку", body, added[-1]["id"])

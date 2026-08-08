@@ -12,9 +12,10 @@ from datetime import datetime
 
 from .db import db, state_get, state_set
 from .timeutil import now
-from .telegram.api import tg, send, typing, delete_msg, download_voice, download_tg_file
+from .telegram.api import (tg, send, edit_text, typing, delete_msg,
+                           download_voice, download_tg_file)
 from .telegram.chat import TypingLoop, all_user_ids, user_clean, set_clean, reply
-from .items.render import line, html_escape, render_list
+from .items.render import line, block, html_escape, render_list
 from .items.repository import (norm_when, add_item, find_target, find_dup, search_events,
                                delete_item, update_item, remember_act, reinsert)
 from .ai.claude import claude_json
@@ -182,7 +183,7 @@ def handle_message(msg):
             rows, warns = confirm_draft(chat_id, uid)
             warn_txt = ("\n⚠️ " + "; ".join(warns)) if warns else ""
             if rows:
-                body = "\n".join(line(r) for r in rows)
+                body = block(rows)
                 reply(chat_id, voice_prefix + "✅ Добавил:\n\n" + body + warn_txt,
                       reply_markup=del_keyboard(rows[-1]["id"]) if len(rows) == 1 else None)
                 notify_partner(uid, "➕ {who} добавил(а)", body, rows[-1]["id"])
@@ -254,7 +255,8 @@ def merge_results(results):
         out["notify"] = notes[0]
     elif notes:
         focus = next((n[2] for n in reversed(notes) if n[2]), None)
-        out["notify"] = ("🔄 {who} поменял(а) расписание", "\n".join(n[1] for n in notes), focus)
+        out["notify"] = ("🔄 {who} поменял(а) расписание",
+                         "\n\n".join(n[1] for n in notes), focus)
     if len(acts) == 1:
         out["act"] = acts[0]
     elif acts:
@@ -283,7 +285,7 @@ def apply_intent(chat_id, uid, intent, text, norm):
             {"norm": norm, "action": "add", "ts": now().isoformat()}))
         txt = f"✅ {intent.get('reply') or 'Записал.'}\n\n{line(row, show_kind=True)}"
         if dup:
-            txt += f"\n⚠️ Похоже на дубль #{dup['id']} — если лишнее, скажи «отмени»."
+            txt += "\n⚠️ Похоже на дубль — если лишнее, скажи «отмени»."
         return {"text": txt, "markup": del_keyboard(item_id),
                 "act": {"action": "add", "id": item_id},
                 "notify": ("➕ {who} добавил(а)", line(row, show_kind=True), item_id)}
@@ -303,7 +305,7 @@ def apply_intent(chat_id, uid, intent, text, norm):
         state_set(f"focus_{chat_id}", str(rows[-1]["id"]))
         state_set(f"lastmsg_{uid}", json.dumps(
             {"norm": norm, "action": "add", "ts": now().isoformat()}))
-        body = "\n".join(line(r, show_kind=True) for r in rows)
+        body = block(rows, show_kind=True)
         txt = f"✅ {intent.get('reply') or 'Записал.'}\n\n" + body
         skipped = len(evs) - len(rows)
         if skipped:
@@ -320,15 +322,16 @@ def apply_intent(chat_id, uid, intent, text, norm):
         if not matches:
             return {"text": "🔎 Не нашёл похожих событий. Напиши «расписание» — покажу всё."}
         state_set(f"focus_{chat_id}", str(matches[0]["id"]))
-        return {"text": "🔎 Вот что нашёл:\n\n" + "\n".join(line(r) for r in matches)}
+        return {"text": "🔎 Вот что нашёл:\n\n" + block(matches)}
 
     if action in ("delete", "update"):
         row, candidates = find_target(intent.get("target"), intent.get("kind"))
         if row is None and candidates:
-            return {"text": "Уточни номером, что именно:\n\n"
-                            + "\n".join(line(r) for r in candidates)}
+            # номеров в карточках больше нет — просим уточнить датой, она видна в списке
+            return {"text": "Уточни, какое именно — назови дату:\n\n" + block(candidates)}
         if row is None:
-            return {"text": "Не нашёл такую запись. Глянь список и укажи номер (#)."}
+            return {"text": "Не нашёл такую запись. Глянь расписание и назови её точнее "
+                            "или ответь (reply) на карточку."}
         state_set(f"focus_{chat_id}", str(row["id"]))
         if action == "delete":
             snapshot = dict(row)
@@ -349,8 +352,8 @@ def apply_intent(chat_id, uid, intent, text, norm):
                     "notify": ("✏️ {who} изменил(а)", line(fresh, show_kind=True), fresh["id"])}
         if warns:
             return {"text": "⚠️ " + "; ".join(warns)
-                            + ". Попробуй сказать дату иначе, напр. «перенеси #5 на пятницу 16:00»."}
-        return {"text": "Не понял, что поменять. Напр.: «перенеси #5 на пятницу 16:00»."}
+                            + ". Попробуй сказать дату иначе, напр. «перенеси йогу на пятницу 16:00»."}
+        return {"text": "Не понял, что поменять. Напр.: «перенеси йогу на пятницу 16:00»."}
 
     if action == "bulk_delete":
         tgs = intent.get("targets")
@@ -365,14 +368,14 @@ def apply_intent(chat_id, uid, intent, text, norm):
         rows = [db().execute("SELECT * FROM items WHERE id=?", (i,)).fetchone() for i in ids]
         rows = [r for r in rows if r]
         if not rows:
-            return {"text": "Не понял, что именно удалить. Назови точнее или номерами (#)."}
+            return {"text": "Не понял, что именно удалить. Назови точнее."}
         token = str(int(time.time() * 1000) % 10**9)
         state_set(f"bulkdel_{chat_id}", json.dumps(
             {"token": token, "ids": [r["id"] for r in rows]}))
         kb = json.dumps({"inline_keyboard": [[
             {"text": f"✅ Удалить ({len(rows)})", "callback_data": f"bulk:yes:{token}"},
             {"text": "Отмена", "callback_data": f"bulk:no:{token}"}]]})
-        return {"text": "🗑 Удалить эти записи?\n\n" + "\n".join(line(r) for r in rows),
+        return {"text": "🗑 Удалить эти записи?\n\n" + block(rows),
                 "markup": kb}
 
     if action == "undo":
@@ -398,7 +401,7 @@ def undo_act(d):
             texts.append(t)
             if nt:
                 bodies.append(nt[1])
-        notify = ("↩️ {who} отменил(а) последнее", "\n".join(bodies), None) if bodies else None
+        notify = ("↩️ {who} отменил(а) последнее", "\n\n".join(bodies), None) if bodies else None
         return "\n\n".join(texts), notify
     if a == "add":
         row = db().execute("SELECT * FROM items WHERE id=?", (d["id"],)).fetchone()
@@ -417,7 +420,7 @@ def undo_act(d):
                 gone.append(row)
         if not gone:
             return "↩️ Тех записей уже нет.", None
-        body = "\n".join(line(r) for r in gone)
+        body = block(gone)
         return ("↩️ Отменил — удалил:\n\n" + body,
                 ("↩️ {who} отменил(а) добавление", body, None))
     if a == "update":
@@ -430,7 +433,7 @@ def undo_act(d):
     for s in snaps:
         reinsert(s)
     back = [db().execute("SELECT * FROM items WHERE id=?", (s["id"],)).fetchone() for s in snaps]
-    body = "\n".join(line(r) for r in back if r)
+    body = block(back)
     return "↩️ Вернул:\n\n" + body, ("↩️ {who} вернул(а) удалённое", body, None)
 
 
@@ -463,16 +466,15 @@ def handle_callback(cb):
                 tg("answerCallbackQuery", callback_query_id=cb["id"], text="Не хватает даты")
                 send(chat_id, "В черновике не хватает даты — напиши, например, «5 августа в 18».")
                 return
-            body = "\n".join(line(r) for r in rows)
+            body = block(rows)
             tg("answerCallbackQuery", callback_query_id=cb["id"], text="Добавлено ✅")
-            tg("editMessageText", chat_id=chat_id, message_id=cb["message"]["message_id"],
-               parse_mode="HTML", text="✅ Добавил в календарь:\n\n" + body + warn_txt)
+            edit_text(chat_id, cb["message"]["message_id"],
+                      "✅ Добавил в календарь:\n\n" + body + warn_txt)
             notify_partner(uid, "➕ {who} добавил(а)", body, rows[-1]["id"])
         else:
             state_set(f"draft_{chat_id}", "")
             tg("answerCallbackQuery", callback_query_id=cb["id"], text="Отменено")
-            tg("editMessageText", chat_id=chat_id, message_id=cb["message"]["message_id"],
-               parse_mode="HTML", text="Ок, ничего не добавляю.")
+            edit_text(chat_id, cb["message"]["message_id"], "Ок, ничего не добавляю.")
         return
 
     if act == "bulk":
@@ -494,8 +496,7 @@ def handle_callback(cb):
         state_set(f"bulkdel_{chat_id}", "")
         if cmd != "yes" or not pend:
             tg("answerCallbackQuery", callback_query_id=cb["id"], text="Отменено")
-            tg("editMessageText", chat_id=chat_id, message_id=cb["message"]["message_id"],
-               parse_mode="HTML", text="Ок, ничего не удаляю.")
+            edit_text(chat_id, cb["message"]["message_id"], "Ок, ничего не удаляю.")
             return
         ids = pend["ids"]
         rows = [db().execute("SELECT * FROM items WHERE id=?", (i,)).fetchone() for i in ids]
@@ -505,9 +506,8 @@ def handle_callback(cb):
             delete_item(r["id"])
         remember_act(chat_id, {"action": "bulk_delete", "before": snaps})
         tg("answerCallbackQuery", callback_query_id=cb["id"], text=f"Удалено: {len(rows)}")
-        tg("editMessageText", chat_id=chat_id, message_id=cb["message"]["message_id"],
-           parse_mode="HTML",
-           text=f"🗑 Удалил записей: {len(rows)}. Вернуть всё — напиши «отмени».")
+        edit_text(chat_id, cb["message"]["message_id"],
+                  f"🗑 Удалил записей: {len(rows)}. Вернуть всё — напиши «отмени».")
         notify_partner(uid, "🗑 {who} удалил(а) записи",
                        "\n".join("• " + html_escape(s["title"]) for s in snaps))
         return
@@ -520,6 +520,6 @@ def handle_callback(cb):
         remember_act(chat_id, {"action": "delete", "before": dict(row)})
         delete_item(row["id"])
         tg("answerCallbackQuery", callback_query_id=cb["id"], text="Удалено 🗑")
-        tg("editMessageText", chat_id=chat_id, message_id=cb["message"]["message_id"],
-           parse_mode="HTML", text=f"🗑 <s>{html_escape(row['title'])}</s>")
+        edit_text(chat_id, cb["message"]["message_id"],
+                  f"🗑 <s>{html_escape(row['title'])}</s>")
         notify_partner(uid, "🗑 {who} удалил(а)", line(row))

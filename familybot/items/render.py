@@ -2,19 +2,27 @@
 # -*- coding: utf-8 -*-
 """Форматирование записей и списков для Telegram (HTML)."""
 
+from ..cards import card_mark
 from ..config import KIND_TITLE, CAT_TITLE, RECUR_TITLE
 from ..db import db
-from ..timeutil import fmt_dt, parse_iso, window
+from ..timeutil import fmt_dt, fmt_day, parse_iso, window
 
 
 def html_escape(s):
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def line(r, show_kind=False):
+def line(r, show_kind=False, show_date=True):
+    """Карточка записи. show_date=False — для списков на один день: дата уже в заголовке."""
     pre = ""
     if r["kind"] == "event" and r["when_dt"]:
-        pre = fmt_dt(r["when_dt"], r["has_time"])
+        if show_date:
+            pre = fmt_dt(r["when_dt"], r["has_time"])
+        elif r["has_time"]:
+            sdt = parse_iso(r["when_dt"])
+            pre = f"{sdt.hour:02d}:{sdt.minute:02d}" if sdt else ""
+        else:
+            pre = "весь день"
         if r["has_time"] and r["end_dt"]:
             edt, sdt = parse_iso(r["end_dt"]), parse_iso(r["when_dt"])
             if edt and sdt and edt.date() != sdt.date():
@@ -22,7 +30,8 @@ def line(r, show_kind=False):
                 pre += f" → {fmt_dt(r['end_dt'], 1)}"
             elif edt:
                 pre += f"–{edt.hour:02d}:{edt.minute:02d}"
-        pre += " — "
+        if pre:
+            pre += " — "
     tags = []
     if show_kind:
         tags.append(KIND_TITLE.get(r["kind"], r["kind"]).split()[0])
@@ -34,7 +43,14 @@ def line(r, show_kind=False):
         tags.append("👤" + html_escape(r["who"]))
     tail = ("  <i>" + " · ".join(tags) + "</i>") if tags else ""
     note = ("\n   <i>" + html_escape(r["note"]) + "</i>") if r["note"] else ""
-    return f"<b>#{r['id']}</b> {pre}{html_escape(r['title'])}{tail}{note}"
+    # card_mark — невидимая метка id: её вырежет send(), а reply на карточку по ней найдёт запись
+    return f"{card_mark(r['id'])}{pre}<b>{html_escape(r['title'])}</b>{tail}{note}"
+
+
+def block(rows, show_kind=False, show_date=True):
+    """Список карточек: между записями пустая строка, чтобы событие с местом
+    не слипалось со следующим."""
+    return "\n\n".join(line(r, show_kind=show_kind, show_date=show_date) for r in rows if r)
 
 
 def events_in(a, b, status=None):
@@ -60,7 +76,7 @@ def render_list(kind, filter_):
         rows = c.execute("SELECT * FROM items WHERE kind='place' ORDER BY id DESC").fetchall()
         if not rows:
             return "📍 Список мест пуст. Напиши, например: «хочу сходить в новый океанариум»."
-        return "📍 <b>Куда сходить</b>\n\n" + "\n".join(line(r) for r in rows)
+        return "📍 <b>Куда сходить</b>\n\n" + block(rows)
 
     # расписание (по умолчанию — неделя)
     f = filter_ if filter_ in ("today", "tomorrow", "week") else "week"
@@ -68,5 +84,9 @@ def render_list(kind, filter_):
     evs = events_in(a, b)
     names = {"today": "Сегодня", "tomorrow": "Завтра", "week": "Расписание на неделю"}
     head = "📅 <b>" + names.get(f, "Расписание") + "</b>"
-    body = "\n".join(line(r) for r in evs) if evs else "пусто"
+    # на один день дату пишем один раз в заголовке, а не у каждого события
+    one_day = f in ("today", "tomorrow")
+    if one_day:
+        head += "\n<i>" + fmt_day(a) + "</i>"
+    body = block(evs, show_date=not one_day) if evs else "пусто"
     return head + "\n\n" + body

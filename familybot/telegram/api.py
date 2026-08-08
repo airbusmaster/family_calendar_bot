@@ -7,6 +7,7 @@ import os
 import requests
 
 from .. import config
+from ..cards import extract_cards
 
 API = f"https://api.telegram.org/bot{config.TG_TOKEN}"
 
@@ -20,12 +21,42 @@ def tg(method, **params):
         return {}
 
 
+def remember_card(chat_id, message_id, ids):
+    """Запомнить, о какой записи это сообщение, — чтобы reply на карточку нашёл её без #номера."""
+    if not ids or not message_id:
+        return
+    from ..db import db, state_set
+    state_set(f"card_{chat_id}_{message_id}", str(ids[0]))
+    # держим только последние 300 карточек, иначе таблица состояния растёт бесконечно
+    c = db()
+    c.execute("DELETE FROM state WHERE key LIKE 'card\\_%' ESCAPE '\\' AND rowid NOT IN "
+              "(SELECT rowid FROM state WHERE key LIKE 'card\\_%' ESCAPE '\\' "
+              "ORDER BY rowid DESC LIMIT 300)")
+    c.commit()
+
+
 def send(chat_id, text, reply_markup=None):
+    ids, text = extract_cards(text)
     params = {"chat_id": chat_id, "text": text, "parse_mode": "HTML",
               "disable_web_page_preview": True}
     if reply_markup:
         params["reply_markup"] = reply_markup
-    return tg("sendMessage", **params)
+    r = tg("sendMessage", **params)
+    if r.get("ok"):
+        remember_card(chat_id, r["result"]["message_id"], ids)
+    return r
+
+
+def edit_text(chat_id, message_id, text, reply_markup=None):
+    ids, text = extract_cards(text)
+    params = {"chat_id": chat_id, "message_id": message_id, "text": text,
+              "parse_mode": "HTML", "disable_web_page_preview": True}
+    if reply_markup:
+        params["reply_markup"] = reply_markup
+    r = tg("editMessageText", **params)
+    if r.get("ok"):
+        remember_card(chat_id, message_id, ids)
+    return r
 
 
 def typing(chat_id):

@@ -9,17 +9,18 @@ from datetime import timedelta
 
 from .config import TZ, MORNING_HOUR
 from .db import db, state_get, state_set
-from .timeutil import now, parse_iso, window
+from .timeutil import now, fmt_day, parse_iso, window
 from .telegram.chat import all_user_ids, broadcast, push
-from .items.render import line, events_in
+from .items.render import line, block, events_in
 from .calendar_sync.client import cal_push
 
 
 def digest_morning():
+    """Дата — один раз в заголовке, у событий остаётся только время."""
     a, b = window("today")
     evs = events_in(a, b)
-    body = "\n".join(line(r) for r in evs) if evs else "свободный день 🙂"
-    return "☀️ <b>Доброе утро! План на сегодня</b>\n\n📅 " + body
+    body = block(evs, show_date=False) if evs else "свободный день 🙂"
+    return f"☀️ <b>Доброе утро! План на сегодня</b>\n<i>{fmt_day(a)}</i>\n\n" + body
 
 
 def digest_evening():
@@ -28,8 +29,8 @@ def digest_evening():
     if not evs:
         body = "На завтра событий пока нет — можно выдохнуть 🙂"
     else:
-        body = "\n".join(line(r) for r in evs)
-    return "🌙 <b>План на завтра</b>\n\n📅 " + body
+        body = block(evs, show_date=False)
+    return f"🌙 <b>План на завтра</b>\n<i>{fmt_day(a)}</i>\n\n" + body
 
 
 def next_occurrence(dt, recur):

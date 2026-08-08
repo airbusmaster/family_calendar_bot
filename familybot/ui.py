@@ -5,7 +5,7 @@
 import re
 import json
 
-from .db import db, state_set
+from .db import db, state_get, state_set
 from .telegram.chat import all_user_ids, push
 from .items.render import html_escape
 
@@ -16,15 +16,25 @@ def del_keyboard(item_id):
 
 
 def reply_ref(msg):
-    """Если пользователь ответил (reply) на карточку записи — вернуть её #id."""
+    """Если пользователь ответил (reply) на карточку записи — вернуть её id.
+
+    Номера в карточках больше не печатаются, поэтому основной путь — таблица
+    «сообщение -> запись», которую ведёт send() (см. cards.py). Регексп по #номеру
+    оставлен запасным: для старых карточек и если номер назвали руками."""
     rt = msg.get("reply_to_message")
     if not rt:
         return None
-    txt = rt.get("text") or rt.get("caption") or ""
-    m = re.search(r"#(\d+)", txt)
-    if not m:
-        return None
-    iid = int(m.group(1))
+    chat_id = (msg.get("chat") or {}).get("id")
+    iid = None
+    if chat_id is not None:
+        saved = state_get(f"card_{chat_id}_{rt.get('message_id')}")
+        if saved:
+            iid = int(saved)
+    if iid is None:
+        m = re.search(r"#(\d+)", rt.get("text") or rt.get("caption") or "")
+        if not m:
+            return None
+        iid = int(m.group(1))
     return iid if db().execute("SELECT 1 FROM items WHERE id=?", (iid,)).fetchone() else None
 
 
