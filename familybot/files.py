@@ -97,6 +97,24 @@ def confirm_draft(chat_id, uid):
     return rows, warns
 
 
+def _dedupe_trips(trips):
+    """Один и тот же билет мог прийти дважды (пересняли, переслали ещё раз).
+
+    Ключ обязательно включает пассажира: два билета на один поезд — это нормально,
+    так двое едут одним поездом, и схлопывать их в одну запись нельзя.
+    """
+    seen, out = set(), []
+    for t in trips:
+        key = (str(t.get("mode") or ""), str(t.get("from") or "").strip().lower(),
+               str(t.get("to") or "").strip().lower(), str(t.get("depart") or ""),
+               str(t.get("passenger") or "").strip().lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(t)
+    return out
+
+
 def _dedupe_events(events):
     """Одно событие могло попасть в несколько файлов альбома — не показываем дважды."""
     seen, out = set(), []
@@ -128,11 +146,14 @@ def process_files(chat_id, uid, datas, prefix=""):
             continue
         trips += [t for t in (d.get("trips") or []) if isinstance(t, dict)]
         events += [e for e in (d.get("events") or []) if isinstance(e, dict)]
+    trips = _dedupe_trips(trips)
     events = _dedupe_events(events)
     warn = (f"\n⚠️ Ещё {failed} файл(а) разобрать не смог — пришли их отдельно."
             if failed else "")
 
-    rows = add_trips(uid, trips) if trips else []
+    rows, dup_trips = add_trips(uid, trips) if trips else ([], 0)
+    if dup_trips:
+        warn += (f"\n👌 Билетов уже было в календаре: {dup_trips} — не дублирую.")
     trips_txt = ""
     if rows:
         trips_txt = "🧳 <b>Добавил поездку в календарь:</b>\n\n" + block(rows) + "\n\n———\n\n"
@@ -147,6 +168,10 @@ def process_files(chat_id, uid, datas, prefix=""):
         reply(chat_id, prefix + trips_txt.replace("\n\n———\n\n", "") + warn,
               reply_markup=del_keyboard(rows[-1]["id"]) if len(rows) == 1 else None)
         return
+    if dup_trips:
+        reply(chat_id, prefix + f"👌 Эти билеты уже в календаре ({dup_trips} шт.) — "
+              "ничего не дублирую.")
+        return
     if trips:
         reply(chat_id, prefix + "📎 Билет распознал, но не нашёл дату отправления. "
               "Добавь поездку текстом с датой, пожалуйста." + warn)
@@ -156,8 +181,8 @@ def process_files(chat_id, uid, datas, prefix=""):
 
 
 def add_trips(uid, trips):
-    """Из распознанных билетов создать события-поездки. -> список строк БД."""
-    added = []
+    """Из распознанных билетов создать события-поездки. -> (строки БД, сколько пропущено)."""
+    added, skipped = [], 0
     for tr in trips:
         when_iso, _ht = norm_when(tr.get("depart"))
         if not when_iso:
@@ -174,6 +199,13 @@ def add_trips(uid, trips):
         intent = {"kind": "event", "title": title, "when": tr.get("depart"),
                   "category": "trip", "who": tr.get("passenger"),
                   "note": "; ".join(np) or None, "remind_before_min": None}
+        # такой же билет того же пассажира уже заводили — второй раз не нужен
+        if db().execute(
+                "SELECT 1 FROM items WHERE kind='event' AND when_dt=? AND lower(title)=lower(?) "
+                "AND IFNULL(lower(who),'')=IFNULL(lower(?),'')",
+                (when_iso, title, tr.get("passenger"))).fetchone():
+            skipped += 1
+            continue
         iid, _k, _w, _h = add_item(intent, uid)
         added.append(db().execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone())
-    return added
+    return added, skipped
