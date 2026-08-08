@@ -66,35 +66,41 @@ def show_draft(chat_id, events, prefix="", head="📸 <b>Вот что я рас
 
 
 def confirm_draft(chat_id, uid):
-    """Добавить события из черновика. -> (rows, warns); rows: None — черновика нет,
-    [] — нет ни одной даты (черновик сохраняется, чтобы дату дописали)."""
+    """Добавить события из черновика. -> (rows, warns, dups); rows: None — черновика нет,
+    [] — ничего не добавили (либо нет дат, либо всё уже есть — тогда dups > 0)."""
     d = draft_state(chat_id)
     if not d:
-        return None, []
-    rows, warns = [], []
+        return None, [], 0
+    rows, warns, dups = [], [], 0
     for ev in d["events"]:
         when_iso, _ht = norm_when(ev.get("when"))
         if not when_iso:
             warns.append(f"«{ev.get('title') or 'без названия'}» — без даты, не добавил")
             continue
-        dup = find_dup((ev.get("title") or "").strip(), when_iso)
+        # повтор не заводим: то же событие легко приходит дважды — переслали ещё раз,
+        # пересняли билет, продублировали фото в альбоме
+        if find_dup((ev.get("title") or "").strip(), when_iso, who=ev.get("who")):
+            dups += 1
+            continue
         intent = {"kind": "event", "title": ev.get("title"), "when": ev.get("when"),
                   "when_end": ev.get("when_end"),
                   "category": ev.get("category") or "general", "who": ev.get("who"),
                   "note": ev.get("note"), "remind_before_min": None}
         iid, _k, _w, _h = add_item(intent, uid)
         rows.append(db().execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone())
-        if dup:
-            warns.append(f"похоже на дубль #{dup['id']} — если лишнее, скажи «отмени»")
+    if dups:
+        warns.append(f"{dups} уже было в календаре — не дублирую")
     if not rows:
-        return [], warns
+        if dups:
+            state_set(f"draft_{chat_id}", "")
+        return [], warns, dups
     state_set(f"draft_{chat_id}", "")
     state_set(f"focus_{chat_id}", str(rows[-1]["id"]))
     if len(rows) == 1:
         remember_act(chat_id, {"action": "add", "id": rows[-1]["id"]})
     else:
         remember_act(chat_id, {"action": "bulk_add", "ids": [r["id"] for r in rows]})
-    return rows, warns
+    return rows, warns, dups
 
 
 def _dedupe_trips(trips):

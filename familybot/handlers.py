@@ -17,8 +17,9 @@ from .telegram.api import (tg, send, edit_text, typing, delete_msg,
                            download_voice, download_tg_file)
 from .telegram.chat import TypingLoop, all_user_ids, user_clean, set_clean, reply
 from .items.render import line, block, html_escape, render_list
-from .items.repository import (norm_when, add_item, find_target, find_dup, search_events,
-                               delete_item, update_item, remember_act, reinsert)
+from .items.repository import (norm_when, add_item, find_target, find_dup, find_dup_place,
+                               search_events, delete_item, update_item, remember_act,
+                               reinsert)
 from .ai.claude import claude_json
 from .ai.parser import parse_intent, analyze_file, analyze_forward
 from .ai.voice import transcribe
@@ -117,6 +118,18 @@ def flush_media_group(chat_id, mgid):
         reply(chat_id, "⚠️ Не получилось разобрать файлы. Попробуй прислать их ещё раз.")
     finally:
         rm_files(paths)
+
+
+def already_there(chat_id, dup, intent):
+    """Ответ на повтор: не добавляем, но даём кнопку — вдруг запись правда нужна дважды."""
+    token = str(int(time.time() * 1000) % 10**9)
+    state_set(f"force_{chat_id}", json.dumps({"token": token, "intent": intent},
+                                             ensure_ascii=False))
+    kb = json.dumps({"inline_keyboard": [[
+        {"text": "➕ Всё равно добавить", "callback_data": f"force:yes:{token}"},
+        {"text": "Не надо", "callback_data": f"force:no:{token}"}]]})
+    return {"text": "👌 Это у меня уже есть — не дублирую:\n\n" + line(dup, show_kind=True),
+            "markup": kb}
 
 
 def is_forwarded(msg):
@@ -275,13 +288,16 @@ def handle_message(msg):
             show_draft(chat_id, res["events"], voice_prefix)
             return
         if op == "confirm":
-            rows, warns = confirm_draft(chat_id, uid)
+            rows, warns, dups = confirm_draft(chat_id, uid)
             warn_txt = ("\n⚠️ " + "; ".join(warns)) if warns else ""
             if rows:
                 body = block(rows)
                 reply(chat_id, voice_prefix + "✅ Добавил:\n\n" + body + warn_txt,
                       reply_markup=del_keyboard(rows[-1]["id"]) if len(rows) == 1 else None)
                 notify_partner(uid, "➕ {who} добавил(а)", body, rows[-1]["id"])
+            elif dups:
+                reply(chat_id, voice_prefix + f"👌 Это уже в календаре ({dups} шт.) — "
+                      "ничего не добавляю.")
             else:
                 reply(chat_id, voice_prefix + "В черновике не хватает даты — "
                       "напиши, например, «5 августа в 18»." + warn_txt)
@@ -372,7 +388,13 @@ def apply_intent(chat_id, uid, intent, text, norm):
             return {"text": "📅 Я сейчас веду только <b>календарь</b> (события с датой) и "
                             "<b>места куда сходить</b>. Списки дел вернём позже.\n\n"
                             "Если это событие — добавь дату/время, например: «в пятницу в 18 …»."}
-        dup = find_dup((intent.get("title") or "").strip(), when_iso)
+        # повтор не заводим вовсе: раньше бот добавлял и лишь потом писал «похоже на дубль»,
+        # и в календаре оседали задвоенные записи (найдено в базе 08.08.2026)
+        dup = (find_dup_place(intent.get("title")) if kind == "place"
+               else find_dup((intent.get("title") or "").strip(), when_iso,
+                             who=intent.get("who")))
+        if dup:
+            return already_there(chat_id, dup, intent)
         item_id, kind, when_iso, has_time = add_item(intent, uid)
         row = db().execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
         state_set(f"focus_{chat_id}", str(item_id))
@@ -388,13 +410,19 @@ def apply_intent(chat_id, uid, intent, text, norm):
     if action == "add_multi":
         evs = [e for e in (intent.get("events") or []) if isinstance(e, dict)]
         rows = []
+        dups = 0
         for ev in evs:
             w_iso, _wh = norm_when(ev.get("when"))
             if not w_iso and ev.get("kind") != "place":
                 continue
+            if find_dup((ev.get("title") or "").strip(), w_iso, who=ev.get("who")):
+                dups += 1
+                continue
             iid, _k, _w, _h = add_item(ev, uid)
             rows.append(db().execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone())
         if not rows:
+            if dups:
+                return {"text": f"👌 Всё это уже в календаре ({dups} шт.) — не дублирую."}
             return {"text": "📅 Не понял даты событий — добавь их, "
                             "например: «вт и пт в 10 тренировка»."}
         state_set(f"focus_{chat_id}", str(rows[-1]["id"]))
@@ -402,7 +430,9 @@ def apply_intent(chat_id, uid, intent, text, norm):
             {"norm": norm, "action": "add", "ts": now().isoformat()}))
         body = block(rows, show_kind=True)
         txt = f"✅ {intent.get('reply') or 'Записал.'}\n\n" + body
-        skipped = len(evs) - len(rows)
+        if dups:
+            txt += f"\n👌 Ещё {dups} уже были в календаре — не дублирую."
+        skipped = len(evs) - len(rows) - dups
         if skipped:
             txt += (f"\n⚠️ Ещё {skipped} не добавил — не разобрал дату. "
                     "Добавь их отдельными сообщениями, пожалуйста.")
@@ -552,12 +582,17 @@ def handle_callback(cb):
                text="Эта карточка устарела — работаем с новым черновиком")
             return
         if cmd == "add":
-            rows, warns = confirm_draft(chat_id, uid)
+            rows, warns, dups = confirm_draft(chat_id, uid)
             warn_txt = ("\n⚠️ " + "; ".join(warns)) if warns else ""
             if rows is None:
                 tg("answerCallbackQuery", callback_query_id=cb["id"], text="Черновика уже нет")
                 return
             if not rows:
+                if dups:
+                    tg("answerCallbackQuery", callback_query_id=cb["id"], text="Уже есть")
+                    edit_text(chat_id, cb["message"]["message_id"],
+                              f"👌 Это уже в календаре ({dups} шт.) — ничего не добавляю.")
+                    return
                 tg("answerCallbackQuery", callback_query_id=cb["id"], text="Не хватает даты")
                 send(chat_id, "В черновике не хватает даты — напиши, например, «5 августа в 18».")
                 return
@@ -570,6 +605,34 @@ def handle_callback(cb):
             state_set(f"draft_{chat_id}", "")
             tg("answerCallbackQuery", callback_query_id=cb["id"], text="Отменено")
             edit_text(chat_id, cb["message"]["message_id"], "Ок, ничего не добавляю.")
+        return
+
+    if act == "force":
+        sub = arg.split(":")
+        cmd, tok = sub[0], (sub[1] if len(sub) > 1 else None)
+        raw = state_get(f"force_{chat_id}")
+        pend = None
+        if raw:
+            try:
+                pend = json.loads(raw)
+            except ValueError:
+                pend = None
+        if not pend or (pend.get("token") and tok and pend["token"] != tok):
+            tg("answerCallbackQuery", callback_query_id=cb["id"], text="Карточка устарела")
+            return
+        state_set(f"force_{chat_id}", "")
+        if cmd != "yes":
+            tg("answerCallbackQuery", callback_query_id=cb["id"], text="Ок, не добавляю")
+            edit_text(chat_id, cb["message"]["message_id"], "Ок, ничего не добавляю.")
+            return
+        item_id, _k, _w, _h = add_item(pend["intent"], uid)
+        row = db().execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+        remember_act(chat_id, {"action": "add", "id": item_id})
+        state_set(f"focus_{chat_id}", str(item_id))
+        tg("answerCallbackQuery", callback_query_id=cb["id"], text="Добавлено ✅")
+        edit_text(chat_id, cb["message"]["message_id"],
+                  "✅ Добавил второй записью:\n\n" + line(row, show_kind=True))
+        notify_partner(uid, "➕ {who} добавил(а)", line(row, show_kind=True), item_id)
         return
 
     if act == "bulk":

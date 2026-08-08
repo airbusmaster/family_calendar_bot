@@ -123,16 +123,61 @@ def reinsert(snap):
     cal_push(snap["id"])
 
 
-def find_dup(title, when_iso, exclude_id=None):
-    """Событие с тем же названием на то же время — вероятный дубль."""
-    if not title or not when_iso:
+_WORDS = re.compile(r"[а-яёa-z0-9]+", re.I)
+
+
+def _title_words(s):
+    """Слова названия, обрезанные до корня: падежи не должны мешать сравнению
+    («Дарьей» и «Дарьи» — одно и то же имя). Тот же приём, что в find_target."""
+    return {w[:4] for w in _WORDS.findall((s or "").lower()) if len(w) >= 3}
+
+
+def same_title(a, b):
+    """Одно и то же событие, даже если названо иначе.
+
+    Сравнивать строки целиком нельзя: одно и то же модель формулирует каждый раз
+    по-своему («Занятие с Дарьей Гуляевой» / «Занятие у Дарьи»). Считаем совпадением,
+    если набор слов одного названия входит в другое или они пересекаются на две трети.
+    """
+    wa, wb = _title_words(a), _title_words(b)
+    if not wa or not wb:
+        return (a or "").strip().lower() == (b or "").strip().lower()
+    if wa <= wb or wb <= wa:
+        return True
+    return len(wa & wb) / len(wa | wb) >= 0.6
+
+
+def find_dup(title, when_iso, who=None, exclude_id=None):
+    """Похожая запись на то же время — вероятный повтор. -> строка БД или None.
+
+    Разные участники — разные записи: два билета на один поезд у двух пассажиров
+    дублями не считаются.
+    """
+    if not when_iso:
         return None
-    q = "SELECT * FROM items WHERE kind='event' AND when_dt=? AND lower(title)=lower(?)"
-    args = [when_iso, title.strip()]
+    q = "SELECT * FROM items WHERE kind='event' AND when_dt=?"
+    args = [when_iso]
     if exclude_id:
         q += " AND id!=?"
         args.append(exclude_id)
-    return db().execute(q, args).fetchone()
+    nw = (who or "").strip().lower()
+    for r in db().execute(q, args).fetchall():
+        rw = (r["who"] or "").strip().lower()
+        if rw and nw and rw != nw:
+            continue
+        if same_title(title, r["title"]):
+            return r
+    return None
+
+
+def find_dup_place(title):
+    """Место с тем же названием уже в списке."""
+    if not title:
+        return None
+    for r in db().execute("SELECT * FROM items WHERE kind='place'").fetchall():
+        if same_title(title, r["title"]):
+            return r
+    return None
 
 
 def search_events(query, limit=5):
