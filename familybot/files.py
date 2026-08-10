@@ -5,6 +5,7 @@
 import json
 import time
 
+from .ai.claude import service_error_text
 from .config import TRIP_EMOJI
 from .db import db, state_get, state_set
 from .timeutil import now, parse_iso, fmt_dt
@@ -147,8 +148,8 @@ def process_files(chat_id, uid, datas, prefix=""):
     datas = [d for d in datas if d]
     failed = sum(1 for d in datas if d.get("_error"))
     if datas and failed == len(datas):
-        reply(chat_id, prefix + "🤖 Сервис распознавания сейчас недоступен — пришли файлы "
-              "ещё раз через минуту-другую.")
+        first = next((d for d in datas if d.get("_error")), None)
+        reply(chat_id, prefix + service_error_text(first, "разобрать файлы"))
         return
     trips, events = [], []
     for d in datas:

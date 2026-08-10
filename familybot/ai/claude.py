@@ -8,6 +8,22 @@ import json
 import subprocess
 
 
+# «You've hit your weekly limit · resets Aug 12, 8pm (UTC)» и подобное
+LIMIT_RE = re.compile(r"(hit your .*limit|usage limit|rate limit|лимит)", re.I)
+
+
+def service_error_text(res, what="разобрать сообщение"):
+    """Честный ответ пользователю, когда модель недоступна."""
+    limit = (res or {}).get("_limit")
+    if limit:
+        safe = limit.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return ("🤖 Кончился лимит Claude по подписке — пока не смогу "
+                f"{what}.\n<i>{safe}</i>\n\nВсё записанное на месте: расписание, "
+                "напоминания и утренняя сводка работают. Спроси «что сегодня» — отвечу.")
+    return ("🤖 Сервис распознавания сейчас недоступен — попробуй через минуту-другую. "
+            "Записи в календаре целы.")
+
+
 def extract_json(s):
     if not s:
         return None
@@ -56,7 +72,13 @@ def claude_json(prompt, model, timeout, think=False, tools=""):
             stdin=subprocess.DEVNULL,
         )
         if proc.returncode != 0:
-            print("claude rc", proc.returncode, proc.stderr[:300], flush=True)
+            # причину CLI пишет в stdout, а не в stderr: раньше в журнал попадало
+            # голое «claude rc 1» без единого намёка, что случилось (08.08.2026)
+            out, err = (proc.stdout or "").strip(), (proc.stderr or "").strip()
+            print("claude rc", proc.returncode, "|", (out or err or "без вывода")[:300],
+                  flush=True)
+            if LIMIT_RE.search(out):
+                return {"_error": True, "_limit": out[:200]}
             return {"_error": True}
         return extract_json(proc.stdout.strip())
     except subprocess.TimeoutExpired:

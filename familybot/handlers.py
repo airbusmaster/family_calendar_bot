@@ -20,7 +20,7 @@ from .items.render import line, block, html_escape, render_list
 from .items.repository import (norm_when, add_item, find_target, find_dup, find_dup_place,
                                search_events, delete_item, update_item, remember_act,
                                reinsert)
-from .ai.claude import claude_json
+from .ai.claude import claude_json, service_error_text
 from .ai.parser import parse_intent, analyze_file, analyze_forward
 from .ai.voice import transcribe
 from .ai.prompts import DRAFT_PROMPT
@@ -279,8 +279,8 @@ def handle_message(msg):
                 now=f"{n.day:02d}.{n.month:02d}.{n.year} {n.strftime('%H:%M')}",
                 message=text), CLAUDE_MODEL, 90)
         if res and res.get("_error"):
-            reply(chat_id, voice_prefix + "🤖 Сервис распознавания сейчас недоступен — "
-                  "попробуй через минуту-другую, черновик я держу.")
+            reply(chat_id, voice_prefix + service_error_text(res, "разобрать правку")
+                  + "\nЧерновик я держу.")
             return
         op = (res or {}).get("op")
         print(f"[draft] op={op} text={text!r}", flush=True)
@@ -316,8 +316,7 @@ def handle_message(msg):
     with TypingLoop(chat_id):
         intent = parse_intent(text, chat_id, ref_id)
     if isinstance(intent, dict) and intent.get("_error"):
-        reply(chat_id, voice_prefix + "🤖 Сервис распознавания сейчас недоступен. "
-              "Сообщение не потерялось зря — просто повтори его через минуту-другую.")
+        reply(chat_id, voice_prefix + service_error_text(intent))
         return
     if not intent or not isinstance(intent, dict):
         reply(chat_id, voice_prefix + "🤔 Не понял. Попробуй иначе или /help.")
