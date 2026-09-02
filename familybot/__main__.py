@@ -13,6 +13,7 @@ import requests
 
 from . import config
 from .db import DB_LOCK, init_db
+from .loans import init_loans
 from .telegram.api import API, tg, mask
 from .handlers import handle_message, handle_callback
 from .scheduler import scheduler_loop
@@ -25,11 +26,13 @@ def main():
         raise SystemExit("TG_TOKEN не задан — укажи его в окружении (см. .env.example)")
 
     init_db()
+    init_loans()
     tg("setMyCommands", commands=[
         {"command": "start", "description": "о боте и как пользоваться"},
         {"command": "help", "description": "примеры команд"},
         {"command": "clean", "description": "чистый чат: убирать лишние сообщения (по умолч.)"},
         {"command": "classic", "description": "обычный режим: ничего не удалять"},
+        {"command": "dolgi", "description": "долги: остаток, ставка, платёж"},
     ])
     threading.Thread(target=scheduler_loop, daemon=True).start()
     if CAL_SYNC:

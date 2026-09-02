@@ -29,6 +29,7 @@ from .help_text import HELP
 from .ui import del_keyboard, reply_ref, notify_partner
 from .files import draft_state, show_draft, confirm_draft, process_files
 from .access import ensure_access
+from . import loans
 
 
 # ------------------------------------------------------------------ альбомы (несколько файлов)
@@ -226,6 +227,23 @@ def handle_message(msg):
         reply(chat_id, "🧹 Ок, держу чат чистым — лишние сообщения убираю.")
         return
 
+    # ждём значение для правки кредита — перехватываем до всякого разбора
+    pend = loans.pending(chat_id)
+    if pend and not text.startswith("/"):
+        val, err = loans.parse_value(pend["field"], text)
+        if err:
+            reply(chat_id, "⚠️ " + err)
+            return
+        loans.set_field(pend["id"], pend["field"], val)
+        loans.clear_pending(chat_id)
+        loan = loans.get_loan(pend["id"])
+        edit_text(chat_id, pend["msg"], loans.loan_card(loan), loans.card_keyboard(loan))
+        return
+
+    if low.startswith(("/kredit", "/credit", "/dolgi", "/dolg")):
+        reply(chat_id, *loan_command(text))
+        return
+
     # быстрые пути без LLM: частые запросы — мгновенный ответ
     norm = re.sub(r"[^\wа-яё ]", "", low).strip()
     FAST = {
@@ -241,6 +259,11 @@ def handle_message(msg):
             return
     if norm in ("места", "список мест", "куда сходить", "куда сходим"):
         reply(chat_id, voice_prefix + render_list("place", None))
+        return
+    if norm in ("кредиты", "долги", "мои кредиты", "кредит", "долг", "сколько должны",
+                "мои долги", "список долгов", "сколько должен", "сколько я должен"):
+        loans.clear_pending(chat_id)
+        reply(chat_id, voice_prefix + loans.loans_summary(), loans.list_keyboard())
         return
 
     # защита от дублей: то же сообщение сразу после add (не дождался ответа — повторил)
@@ -561,6 +584,54 @@ def undo_act(d):
     return "↩️ Вернул:\n\n" + body, ("↩️ {who} вернул(а) удалённое", body, None)
 
 
+def loan_command(text):
+    """/dolgi или /kredit … -> (текст, клавиатура). Для тех, кому быстрее текстом."""
+    parts = text.split(maxsplit=1)
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    low = arg.lower()
+
+    if not arg or low in ("список", "все"):
+        return loans.loans_summary(), loans.list_keyboard()
+
+    if low.startswith(("добавить", "новый")):
+        parsed, err = loans.parse_add(arg.split(maxsplit=1)[1] if " " in arg else "")
+        if err:
+            return "⚠️ " + err, None
+        name, principal, rate, payment = parsed
+        loans.add_loan(name, principal, rate, payment)
+        return loans.loans_summary(), loans.list_keyboard()
+
+    # «/kredit 2 ставка 22,9» — правка одной строкой
+    m = re.match(r"(\d+)\s*(.*)", arg)
+    if not m:
+        return ("⚠️ Не понял. <code>/dolgi</code> — список, "
+                "<code>/dolgi 2 ставка 22,9</code> — правка."), None
+    loan = loans.get_loan(int(m.group(1)))
+    if not loan:
+        return "⚠️ Такого долга нет.", loans.list_keyboard()
+    rest = m.group(2).strip()
+    if not rest:
+        return loans.loan_card(loan), loans.card_keyboard(loan)
+
+    ALIAS = {"ставка": "rate", "процент": "rate", "проценты": "rate",
+             "остаток": "balance", "долг": "balance", "сумма": "balance",
+             "платёж": "payment", "платеж": "payment",
+             "день": "day", "число": "day",
+             "банк": "bank", "название": "name", "имя": "name"}
+    w = rest.split(maxsplit=1)
+    field = ALIAS.get(w[0].lower())
+    if not field:
+        return ("⚠️ Поля: ставка, остаток, платёж, день, банк, название.\n"
+                "Напр. <code>/dolgi " + str(loan["id"]) + " ставка 22,9</code>"), None
+    if len(w) < 2:
+        return "⚠️ Не хватает значения. " + loans.FIELDS[field][1], None
+    val, err = loans.parse_value(field, w[1])
+    if err:
+        return "⚠️ " + err, None
+    loans.set_field(loan["id"], field, val)
+    return loans.loan_card(loans.get_loan(loan["id"])), loans.card_keyboard(loans.get_loan(loan["id"]))
+
+
 def handle_callback(cb):
     data = cb.get("data", "")
     chat_id = cb["message"]["chat"]["id"]
@@ -571,6 +642,43 @@ def handle_callback(cb):
     if ":" not in data:
         return
     act, arg = data.split(":", 1)
+
+    if act == "loan":
+        sub = arg.split(":")
+        cmd = sub[0]
+        mid = cb["message"]["message_id"]
+        if cmd == "list":
+            loans.clear_pending(chat_id)
+            edit_text(chat_id, mid, loans.loans_summary(), loans.list_keyboard())
+            tg("answerCallbackQuery", callback_query_id=cb["id"])
+            return
+        loan = loans.get_loan(int(sub[1])) if len(sub) > 1 and sub[1].isdigit() else None
+        if not loan:
+            tg("answerCallbackQuery", callback_query_id=cb["id"], text="Кредита уже нет")
+            return
+        if cmd == "show":
+            loans.clear_pending(chat_id)
+        elif cmd == "close":
+            loans.set_closed(loan["id"], True)
+            loan = loans.get_loan(loan["id"])
+        elif cmd == "open":
+            loans.set_closed(loan["id"], False)
+            loan = loans.get_loan(loan["id"])
+        elif cmd == "cancel":
+            loans.clear_pending(chat_id)
+        elif cmd == "set" and len(sub) > 2 and sub[2] in loans.FIELDS:
+            field = sub[2]
+            loans.set_pending(chat_id, {"id": loan["id"], "field": field, "msg": mid})
+            title, hint = loans.FIELDS[field]
+            edit_text(chat_id, mid,
+                      loans.loan_card(loan) + f"\n\n✏️ Пришли новое значение: <b>{title}</b>\n{hint}",
+                      json.dumps({"inline_keyboard": [[
+                          {"text": "✖️ Отмена", "callback_data": f"loan:cancel:{loan['id']}"}]]}))
+            tg("answerCallbackQuery", callback_query_id=cb["id"], text="Жду значение")
+            return
+        edit_text(chat_id, mid, loans.loan_card(loan), loans.card_keyboard(loan))
+        tg("answerCallbackQuery", callback_query_id=cb["id"])
+        return
 
     if act == "draft":
         sub = arg.split(":")
